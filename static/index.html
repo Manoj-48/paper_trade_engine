@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paper Trader</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="manifest" href="/manifest.json">
+</head>
+<body>
+    <h1>Paper Trader</h1>
+
+    <div id="user-info">
+        <h2>My Portfolio</h2>
+        <p>Cash: $<span id="cash">100000.00</span></p>
+    </div>
+
+    <div id="search-container">
+        <input type="text" id="ticker-input" placeholder="Enter stock ticker (e.g., AAPL)">
+        <button id="search-btn">Search</button>
+    </div>
+
+    <div id="stock-info">
+        <h2>Stock Information</h2>
+        <p><strong>Ticker:</strong> <span id="stock-ticker"></span></p>
+        <p><strong>Price:</strong> $<span id="stock-price"></span></p>
+        <input type="number" id="quantity-input" placeholder="Quantity">
+        <button id="buy-btn">Buy</button>
+        <button id="sell-btn">Sell</button>
+    </div>
+
+    <div id="portfolio">
+        <h2>My Stocks</h2>
+        <ul id="stock-list">
+            <!-- Stock items will be added here -->
+        </ul>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

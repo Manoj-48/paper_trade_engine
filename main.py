@@ -1,81 +1,177 @@
+import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yfinance as yf
+import pandas as pd
+from datetime import datetime
+import os
 
-app = FastAPI()
+app = FastAPI(title="Paper Trade Engine V2")
 
-# In-memory data stores
-portfolio = {
-    "cash": 100000.0,
-    "stocks": {}
-}
+# --- Configuration ---
+DATA_FOLDER = "data"
+LOG_FILE = os.path.join(DATA_FOLDER, "trade_log.csv")
 
-class Trade(BaseModel):
+# --- Data Models ---
+class Signal(BaseModel):
+    source: str
     ticker: str
-    quantity: int
+    action: str  # "BUY" or "SELL"
+    sl: float
+    target: float
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+class Trade:
+    def __init__(self, signal: Signal, entry_price: float):
+        self.id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        self.signal = signal
+        self.entry_price = entry_price
+        self.entry_time = datetime.now()
+        self.status = "OPEN"
+        self.exit_price = None
+        self.exit_time = None
+        self.pnl = 0.0
 
-@app.get("/")
-async def read_index():
-    return FileResponse('static/index.html')
+    def close(self, exit_price: float):
+        self.exit_price = exit_price
+        self.exit_time = datetime.now()
+        self.status = "CLOSED"
+        if self.signal.action == "BUY":
+            self.pnl = self.exit_price - self.entry_price
+        else: # SELL
+            self.pnl = self.entry_price - self.exit_price
+        log_trade(self)
 
-@app.get("/manifest.json")
-async def read_manifest():
-    return FileResponse('manifest.json')
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "source": self.signal.source,
+            "ticker": self.signal.ticker,
+            "action": self.signal.action,
+            "entry_price": self.entry_price,
+            "entry_time": self.entry_time,
+            "sl": self.signal.sl,
+            "target": self.signal.target,
+            "status": self.status,
+            "exit_price": self.exit_price,
+            "exit_time": self.exit_time,
+            "pnl": self.pnl,
+        }
 
-@app.get("/service-worker.js")
-async def read_service_worker():
-    return FileResponse('service-worker.js')
+# --- In-Memory State ---
+# Using a dictionary to store trades by ID for quick access
+open_trades = {}
 
-@app.get("/api/stock/{ticker}")
-async def get_stock_price(ticker: str):
+# --- Helper Functions ---
+def setup():
+    """Create necessary folders and files on startup."""
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    if not os.path.exists(LOG_FILE):
+        pd.DataFrame(columns=[
+            "id", "source", "ticker", "action", "entry_price", "entry_time",
+            "sl", "target", "status", "exit_price", "exit_time", "pnl"
+        ]).to_csv(LOG_FILE, index=False)
+
+def log_trade(trade: Trade):
+    """Appends a closed trade to the CSV log file."""
+    try:
+        trade_df = pd.DataFrame([trade.to_dict()])
+        trade_df.to_csv(LOG_FILE, mode='a', header=False, index=False)
+    except Exception as e:
+        print(f"Error logging trade: {e}")
+
+def get_live_price(ticker: str) -> float:
+    """Fetches the last closing price for a ticker."""
     try:
         stock = yf.Ticker(ticker)
-        price = stock.history(period="1d")["Close"].iloc[-1]
-        return {"ticker": ticker, "price": price}
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Stock not found: {e}")
-
-@app.post("/api/buy")
-async def buy_stock(trade: Trade):
-    try:
-        stock = yf.Ticker(trade.ticker)
-        price = stock.history(period="1d")["Close"].iloc[-1]
-        cost = price * trade.quantity
-
-        if portfolio["cash"] >= cost:
-            portfolio["cash"] -= cost
-            portfolio["stocks"][trade.ticker] = portfolio["stocks"].get(trade.ticker, 0) + trade.quantity
-            return {"message": "Trade successful"}
-        else:
-            raise HTTPException(status_code=400, detail="Not enough cash")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/sell")
-async def sell_stock(trade: Trade):
-    if trade.ticker not in portfolio["stocks"] or portfolio["stocks"][trade.ticker] < trade.quantity:
-        raise HTTPException(status_code=400, detail="Not enough stock to sell")
-
-    try:
-        stock = yf.Ticker(trade.ticker)
-        price = stock.history(period="1d")["Close"].iloc[-1]
-        revenue = price * trade.quantity
-
-        portfolio["stocks"][trade.ticker] -= trade.quantity
-        if portfolio["stocks"][trade.ticker] == 0:
-            del portfolio["stocks"][trade.ticker]
+        # Using '1d' period to get the most recent price data available.
+        price_history = stock.history(period="1d", interval="1m")
+        if price_history.empty:
+            # Fallback for less frequent tickers
+            price_history = stock.history(period="1d")
         
-        portfolio["cash"] += revenue
-        return {"message": "Trade successful"}
+        if price_history.empty:
+            raise ValueError("No price data found.")
+            
+        return price_history["Close"].iloc[-1]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error fetching price for {ticker}: {e}")
+        return None
 
+# --- API Endpoints ---
+@app.on_event("startup")
+async def startup_event():
+    setup()
 
-@app.get("/api/portfolio")
-async def get_portfolio():
-    return portfolio
+@app.post("/signal", status_code=201)
+async def process_signal(signal: Signal):
+    """
+    Receives a signal, creates a new trade, and adds it to our open trades.
+    This is the "Manual paste JM signal" entry point.
+    """
+    print(f"Received signal: {signal.dict()}")
+
+    live_price = get_live_price(signal.ticker)
+    if not live_price:
+        raise HTTPException(status_code=404, detail=f"Could not fetch live price for {signal.ticker}")
+
+    trade = Trade(signal=signal, entry_price=live_price)
+    open_trades[trade.id] = trade
+    
+    print(f"New trade created: {trade.to_dict()}")
+    return {"message": "Trade created successfully", "trade": trade.to_dict()}
+
+@app.get("/trades/open")
+async def get_open_trades():
+    """Returns a list of all currently open trades."""
+    return [trade.to_dict() for trade in open_trades.values()]
+
+@app.get("/trades/log")
+async def get_trade_log():
+    """Returns all logged trades from the CSV file."""
+    try:
+        df = pd.read_csv(LOG_FILE)
+        return df.to_dict(orient="records")
+    except FileNotFoundError:
+        return []
+
+# This would be run in a background task in a real application
+# For now, we can have a manual endpoint to trigger it.
+@app.post("/engine/run")
+async def run_trade_engine():
+    """
+    This function simulates the core engine logic.
+    It iterates through open trades and checks for SL/Target hits.
+    """
+    closed_trades_count = 0
+    trades_to_remove = []
+    
+    for trade_id, trade in open_trades.items():
+        live_price = get_live_price(trade.signal.ticker)
+        if not live_price:
+            continue
+
+        print(f"Checking trade {trade.id} ({trade.signal.ticker}). Live price: {live_price}")
+
+        # Check SL/Target
+        if trade.signal.action == "BUY":
+            if live_price <= trade.signal.sl:
+                print(f"SL hit for {trade.id}")
+                trade.close(live_price)
+                closed_trades_count += 1
+                trades_to_remove.append(trade_id)
+            elif live_price >= trade.signal.target:
+                print(f"Target hit for {trade.id}")
+                trade.close(live_price)
+                closed_trades_count += 1
+                trades_to_remove.append(trade_id)
+        
+        # TODO: Add SELL logic for SL/Target check
+
+    # Clean up closed trades from the in-memory dictionary
+    for trade_id in trades_to_remove:
+        del open_trades[trade_id]
+
+    return {"message": f"Engine run complete. Closed {closed_trades_count} trades."}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
